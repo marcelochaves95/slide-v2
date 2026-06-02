@@ -91,7 +91,7 @@
 
   // --- Button in iD's edit/operations menu (shown on select / right-click) ---
   // The button reuses iD's native `.edit-menu-item` classes, so iD's own CSS styles it.
-  // The original Strava "Slide" operation icon (from Refs iD-master sprite #operation-slide),
+  // The original iD "Slide" operation icon (#operation-slide), inlined as path data and
   // recolored to currentColor so it matches the other edit-menu icons.
   const SLIDE_ICON =
     '<div class="icon-wrap"><svg class="icon operation" viewBox="423 382 14 16">' +
