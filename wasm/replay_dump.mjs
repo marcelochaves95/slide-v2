@@ -62,8 +62,32 @@ function avgTurn(p) {
   }
   return tn ? turn / tn : 0;
 }
+// dump grid is now UNMASKED; re-apply the corridor here to replicate shipped behavior (render still
+// uses the raw grid so we see nearby roads/branches the corridor removes).
+const inPxAll = input.map(([lon, lat]) => [colOfLon(lon), rowOfLat(lat)]);
+function distToPolyline2(px, py, poly) {
+  let best = Infinity;
+  for (let i = 1; i < poly.length; i++) {
+    const ax = poly[i - 1][0], ay = poly[i - 1][1], bx = poly[i][0], by = poly[i][1];
+    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; if (t < 0) t = 0; else if (t > 1) t = 1;
+    const ex = px - (ax + t * dx), ey = py - (ay + t * dy); const d2 = ex * ex + ey * ey; if (d2 < best) best = d2;
+  }
+  return best;
+}
+const maskedGrid = (() => {
+  const g = grid.slice();
+  if (dump.corridorSigmaMeters) { // soft corridor (current)
+    const sPx = dump.corridorSigmaMeters / M_PER_PX, denom = 2 * sPx * sPx, cut2 = (3.5 * sPx) ** 2;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (!g[i]) continue; const d2 = distToPolyline2(x, y, inPxAll); g[i] = d2 > cut2 ? 0 : Math.round(g[i] * Math.exp(-d2 / denom)); }
+  } else if (dump.corridorMeters) { // legacy hard corridor
+    const c2 = (dump.corridorMeters / M_PER_PX) ** 2;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (g[i] && distToPolyline2(x, y, inPxAll) > c2) g[i] = 0; }
+  }
+  return g;
+})();
 function runSlide(extra) {
-  const res = globalThis.__slideV2Wasm(Object.assign({ width: W, height: H, grid, west, east, south, north, path: input }, extra));
+  const res = globalThis.__slideV2Wasm(Object.assign({ width: W, height: H, grid: maskedGrid, west, east, south, north, path: input }, extra));
   return res && res.ok ? res.path : null;
 }
 
@@ -93,7 +117,11 @@ const OW = W * SC, OH = H * SC;
 const img = new Uint8Array(OW * OH * 3);
 for (let y = 0; y < OH; y++) for (let x = 0; x < OW; x++) {
   const v = grid[Math.floor(y / SC) * W + Math.floor(x / SC)];
-  const o = (y * OW + x) * 3; img[o] = v; img[o + 1] = v; img[o + 2] = v;
+  const t = (v / Math.max(1, gmax)) * 3; // hot colormap so the bright core stands out
+  const o = (y * OW + x) * 3;
+  img[o] = Math.max(0, Math.min(255, t * 255));
+  img[o + 1] = Math.max(0, Math.min(255, (t - 1) * 255));
+  img[o + 2] = Math.max(0, Math.min(255, (t - 2) * 255));
 }
 function plot(p, rgb, thick) {
   for (let i = 1; i < p.length; i++) {
@@ -115,10 +143,10 @@ function dot(cx, cy, rgb) {
     const o = (yy * OW + xx) * 3; img[o] = rgb[0]; img[o + 1] = rgb[1]; img[o + 2] = rgb[2];
   }
 }
-if (outs['s8a0.1']) plot(outs['s8a0.1'], [255, 40, 40], 1);   // current default = red
-if (outs['s18a0.5']) plot(outs['s18a0.5'], [40, 255, 80], 0); // stronger = green
-plot(input, [40, 140, 255], 0);                                // input = blue
-for (const [lon, lat] of input) dot(colOfLon(lon), rowOfLat(lat), [255, 255, 0]); // input nodes = yellow
+if (outs['s8a0.1']) plot(outs['s8a0.1'], [255, 60, 60], 0);   // old std8 = red
+if (outs['s12a0.1']) plot(outs['s12a0.1'], [60, 255, 90], 1); // shipped std12 = green
+plot(input, [80, 160, 255], 0);                                // input = blue
+for (const [lon, lat] of input) dot(colOfLon(lon), rowOfLat(lat), [255, 255, 255]); // input nodes = white
 
 function crc32(buf) { let c, crc = 0xffffffff; for (let n = 0; n < buf.length; n++) { c = (crc ^ buf[n]) & 0xff; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crc = (crc >>> 8) ^ c; } return (crc ^ 0xffffffff) >>> 0; }
 function chunk(type, data) { const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0); const t = Buffer.from(type, 'ascii'); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([t, data])), 0); return Buffer.concat([len, t, data, crc]); }

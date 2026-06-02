@@ -5,9 +5,11 @@
   if (NS.coreInstalled) return;
   NS.coreInstalled = true;
 
-  // Options for the Go WASM slide. Smoothing is AUTO-derived from the heatmap band width by
-  // default — no manual tuning. Only set fields here to override for debugging.
-  NS.WASM_OPTIONS = NS.WASM_OPTIONS || {};
+  // Options for the heatmap snap (all automatic by default; set only to override for debugging):
+  //   snapSigmaMeters   – how strongly the result stays on your drawn line (default 4)
+  //   snapSearchMeters  – how far perpendicular it looks for the band (default 7)
+  //   snapSmoothPasses  – smoothing of the sideways offsets along the trail (default 2)
+  NS.SNAP_OPTIONS = NS.SNAP_OPTIONS || {};
 
   const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
@@ -297,7 +299,7 @@
     return best;
   }
 
-  function extractGrid(surf, pxPath, marginPx, corridorPx) {
+  function extractGrid(surf, pxPath, marginPx, corridorSigmaPx) {
     const fullW = surf.width;
     const fullH = surf.height;
     const data = surf.data;
@@ -314,30 +316,37 @@
     const ey = Math.min(fullH, Math.ceil(maxY) + marginPx);
     const W = ex - ox;
     const H = ey - oy;
-    const grid = new Uint8Array(W * H);
+    const rawGrid = new Uint8Array(W * H);
     for (let y = 0; y < H; y++) {
       const srcRow = (y + oy) * fullW;
       for (let x = 0; x < W; x++) {
         const p = (srcRow + x + ox) * 4;
-        grid[y * W + x] = data[p + 3] > 0 ? data[p] : 0; // luma (R) masked by alpha
+        rawGrid[y * W + x] = data[p + 3] > 0 ? data[p] : 0; // luma (R) masked by alpha
       }
     }
-    // Corridor mask: zero everything farther than corridorPx from the drawn line. The hand trace
-    // is reliable, so the slide should only correct LOCALLY — this stops it being dragged toward
-    // brighter nearby features (roads, other trails) that aren't the trail being traced.
-    if (corridorPx > 0) {
+    // Soft corridor: weight intensity by closeness to the drawn line (× e^(−d²/2σ²)). The hand
+    // trace is reliable, so a dim-but-close trail outscores a bright-but-far road — the slide
+    // polishes LOCALLY instead of being dragged onto brighter nearby roads/trails. Tuned on real
+    // dumps (wasm/run_dump_soft.mjs): σ≈5 m handles road-pull, a parallel road ~7 m away, and
+    // bumpy-band kinks. Beyond 3.5σ the weight is ~0, so we hard-cut there to save work.
+    // Keep rawGrid (unmasked) for offline debugging (the weighted grid hides nearby roads).
+    const grid = rawGrid.slice();
+    if (corridorSigmaPx > 0) {
       const local = pxPath.map(([px, py]) => [px - ox, py - oy]);
-      const c2 = corridorPx * corridorPx;
+      const denom = 2 * corridorSigmaPx * corridorSigmaPx;
+      const cutoff2 = (3.5 * corridorSigmaPx) ** 2;
       for (let y = 0; y < H; y++) {
         for (let x = 0; x < W; x++) {
           const i = y * W + x;
-          if (grid[i] !== 0 && distToPolyline2(x, y, local) > c2) grid[i] = 0;
+          if (grid[i] === 0) continue;
+          const d2 = distToPolyline2(x, y, local);
+          grid[i] = d2 > cutoff2 ? 0 : Math.round(grid[i] * Math.exp(-d2 / denom));
         }
       }
     }
     const nw = surf.pixelToLonLat(ox, oy);
     const se = surf.pixelToLonLat(ex, ey);
-    return { width: W, height: H, grid, west: nw[0], north: nw[1], east: se[0], south: se[1] };
+    return { width: W, height: H, grid, rawGrid, west: nw[0], north: nw[1], east: se[0], south: se[1] };
   }
 
   // Auto-estimate the heatmap band width near the path (perpendicular FWHM -> Gaussian std, in
@@ -499,23 +508,101 @@
     return out;
   }
 
-  // Full pipeline: read the heatmap, run the Go WASM slide, apply the result to iD (undoable).
+  // Bilinear sample of the heatmap intensity (luma R channel, masked by alpha) at a pixel.
+  function sampleSurf(surf, px, py) {
+    const W = surf.width, H = surf.height, d = surf.data;
+    if (px < 0) px = 0; else if (px > W - 1) px = W - 1;
+    if (py < 0) py = 0; else if (py > H - 1) py = H - 1;
+    const x0 = Math.floor(px), y0 = Math.floor(py);
+    const x1 = Math.min(x0 + 1, W - 1), y1 = Math.min(y0 + 1, H - 1);
+    const fx = px - x0, fy = py - y0;
+    const at = (x, y) => { const i = (y * W + x) * 4; return d[i + 3] > 0 ? d[i] : 0; };
+    return (
+      at(x0, y0) * (1 - fx) * (1 - fy) + at(x1, y0) * fx * (1 - fy) +
+      at(x0, y1) * (1 - fx) * fy + at(x1, y1) * fx * fy
+    );
+  }
+
+  // Snap each interior node onto the local heatmap band. For each node we look PERPENDICULAR to the
+  // trail and move it to the best band point — argmax of intensity × gaussian(distance from the
+  // drawn line) — so a node already on the band stays put, an off node moves onto it, and a
+  // farther/brighter feature (a nearby road) is down-weighted. Then the sideways OFFSETS are
+  // smoothed along the trail to remove jitter without cutting curves. Conservative on purpose
+  // (σ≈4 m, search ±7 m): the result stays on the user's good hand trace. We KEEP the user's nodes
+  // (just nudge each), instead of the old resample+refine that invented a drifting new line.
+  // Tuned + validated on 3 real dumps (wasm/run_dump_snap.mjs). Returns pixels; endpoints unchanged.
+  function snapToBand(surf, pxPath, mpp, opts) {
+    const sigmaPx = (opts.snapSigmaMeters != null ? opts.snapSigmaMeters : 4) / mpp;
+    const R = (opts.snapSearchMeters != null ? opts.snapSearchMeters : 7) / mpp;
+    const passes = opts.snapSmoothPasses != null ? opts.snapSmoothPasses : 2;
+    const denom = 2 * sigmaPx * sigmaPx;
+    const N = pxPath.length;
+    const offs = new Float64Array(N);
+    const perp = new Array(N).fill(null);
+    for (let i = 1; i < N - 1; i++) {
+      let tx = pxPath[i + 1][0] - pxPath[i - 1][0];
+      let ty = pxPath[i + 1][1] - pxPath[i - 1][1];
+      const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
+      const nx = -ty, ny = tx; // perpendicular to the local trail direction
+      perp[i] = [nx, ny];
+      let best = 0, off = 0; // best=0 so an empty perpendicular (no heatmap) leaves the node put
+      for (let s = -R; s <= R; s += 0.25) {
+        const v = sampleSurf(surf, pxPath[i][0] + nx * s, pxPath[i][1] + ny * s);
+        const score = v * Math.exp(-(s * s) / denom);
+        if (score > best) { best = score; off = s; }
+      }
+      offs[i] = off;
+    }
+    for (let p = 0; p < passes; p++) { // smooth the offsets along the trail (endpoints stay 0)
+      const q = offs.slice();
+      for (let i = 1; i < N - 1; i++) q[i] = (offs[i - 1] + 2 * offs[i] + offs[i + 1]) / 4;
+      for (let i = 1; i < N - 1; i++) offs[i] = q[i];
+    }
+    const out = pxPath.map((p) => p.slice());
+    for (let i = 1; i < N - 1; i++) {
+      out[i] = [pxPath[i][0] + perp[i][0] * offs[i], pxPath[i][1] + perp[i][1] * offs[i]];
+    }
+    return out;
+  }
+
+  // Action: move each interior node to its snapped location, preserving node IDs / count / order so
+  // junctions, tags and relation membership stay intact. Endpoints and "interesting" nodes
+  // (shared junctions / tagged / in relations) are left untouched so connected features aren't dragged.
+  function buildSnapAction(wayId, newLocs) {
+    return function (graph) {
+      const way = graph.entity(wayId);
+      const ids = way.nodes;
+      for (let i = 1; i < ids.length - 1; i++) {
+        const loc = newLocs[i];
+        if (!loc) continue;
+        const node = graph.hasEntity(ids[i]);
+        if (!node) continue;
+        if (
+          graph.parentWays(node).length > 1 ||
+          graph.parentRelations(node).length > 0 ||
+          node.hasInterestingTags()
+        ) {
+          continue;
+        }
+        graph = graph.replace(node.move(loc));
+      }
+      return graph;
+    };
+  }
+
+  // Full pipeline: read the heatmap and snap the way's nodes onto the band (undoable). Keeps the
+  // user's nodes — only nudges each one locally onto the heatmap — because a hand trace is already
+  // good; the previous resample+refine approach invented a new line that drifted off the trail.
   NS.slideAndApply = async function (context, way) {
-    const need = ['osmNode', 'actionDeleteNode', 'geoChooseEdge'];
-    const missing = need.filter((k) => typeof (window.iD || {})[k] !== 'function');
-    if (missing.length) {
-      console.warn('[slide-v2] missing iD API (cannot apply):', missing);
+    if (!window.iD) {
+      console.warn('[slide-v2] iD not available');
       return;
     }
-
-    const wasmOk = NS.wasmReady ? await NS.wasmReady : false;
-    if (!wasmOk || typeof window.__slideV2Wasm !== 'function') {
-      console.warn('[slide-v2] WASM not ready — cannot slide');
-      return;
-    }
-
     const path = context.graph().childNodes(way).map((n) => n.loc.slice());
-    if (path.length < 2) return;
+    if (path.length < 3) {
+      console.info('[slide-v2] need at least 3 nodes (2 endpoints + 1 interior) to snap');
+      return;
+    }
 
     const surf = await NS.buildSurface(context, path);
     if (!surf.ok) {
@@ -525,77 +612,42 @@
 
     const centerLat = path.reduce((a, p) => a + p[1], 0) / path.length;
     const mpp = NS.metersPerPixel(surf.z, surf.tileSize, centerLat);
-    const opts = NS.WASM_OPTIONS;
+    const opts = NS.SNAP_OPTIONS;
     const pxPath = path.map(([lon, lat]) => surf.pixelOf(lon, lat));
-    // Smoothing denoises the heatmap so the gradient is stable; it's a fixed value, NOT the band
-    // width (band-width over-smoothed and cut curves). The real Strava band is bumpy (overlaid GPS
-    // traces), so too little smoothing makes points settle at different lateral offsets -> kinks.
-    // Calibrated on real dumps (wasm/run_dump_fix.mjs): stdDev 12 removes the kink (turn 22deg->8deg)
-    // while the synthetic curve test (run_test_real.mjs) shows it costs only ~0.5 m on a tight curve.
-    // (Effective ground smoothing ~= stdDev * 2.4 m; see utils/kernel.go.) Automatic; not per-trail.
-    const smoothing = opts.smoothingStdDev != null ? opts.smoothingStdDev : 12;
-    // Corridor: only snap to the heatmap within this distance of the drawn line, so the slide can't
-    // be pulled off the trail toward brighter nearby roads/trails. The hand trace is trusted; the
-    // slide makes only local corrections. Validated on real data (wasm/run_dump_fix.mjs): a ~20 m
-    // corridor removes the road-bulge (25 m -> 4 m) and most zigzag. Automatic; not tuned per trail.
-    const corridorMeters = opts.corridorMeters != null ? opts.corridorMeters : 20;
-    const corridorPx = corridorMeters / mpp;
-    const marginPx = Math.ceil((corridorMeters + 3.5 * smoothing) / mpp) + 6;
-    const grid = extractGrid(surf, pxPath, marginPx, corridorPx);
-    console.log('[slide-v2] surface', {
-      smoothingStdDev: smoothing,
-      corridorMeters,
-      mpp: +mpp.toFixed(2),
-      gridSize: grid.width + 'x' + grid.height,
-    });
-
-    const req = Object.assign(
-      {
-        width: grid.width,
-        height: grid.height,
-        grid: grid.grid,
-        west: grid.west,
-        east: grid.east,
-        south: grid.south,
-        north: grid.north,
-        smoothingStdDev: smoothing,
-        path: path,
-      },
-      opts
-    );
-    // Keep the exact WASM input so it can be dumped + replayed offline (NS.dumpLastSlide()).
-    NS._lastSlide = req;
 
     const t0 = performance.now();
-    const res = window.__slideV2Wasm(req);
+    const snappedPx = snapToBand(surf, pxPath, mpp, opts);
     const runtimeMs = Math.round(performance.now() - t0);
 
-    if (!res || !res.ok) {
-      console.warn('[slide-v2] WASM slide failed:', res && res.error);
-      return;
-    }
-    // The WASM resamples to 5 m spacing, so it returns far more points than needed. Simplify with
-    // Douglas-Peucker (~3 m, ~GPS noise) so we don't add redundant nodes. Automatic; not tuned.
-    const rawCount = res.path.length;
-    const simplifyTol = opts.simplifyMeters != null ? opts.simplifyMeters : 3;
-    const corrected = simplifyLonLat(res.path, simplifyTol, centerLat); // [[lon, lat], ...]
-    if (NS.debugDrawPath) NS.debugDrawPath(corrected, 'cyan'); // result we apply (debug)
-    context.perform(buildSlideAction(context, way.id, corrected), 'Slide geometry to Strava heatmap');
+    // endpoints unchanged (null); interior nodes get a new lon/lat
+    const newLocs = snappedPx.map((p, i) =>
+      i === 0 || i === snappedPx.length - 1 ? null : surf.pixelToLonLat(p[0], p[1])
+    );
 
-    console.log('[slide-v2] slid onto heatmap (WASM)', {
+    // Keep the raw heatmap crop + path for offline debugging (NS.dumpLastSlide / run_dump_snap.mjs).
+    const searchM = opts.snapSearchMeters != null ? opts.snapSearchMeters : 7;
+    const crop = extractGrid(surf, pxPath, Math.ceil((searchM + 12) / mpp), 0);
+    NS._lastSlide = {
+      width: crop.width, height: crop.height,
+      west: crop.west, east: crop.east, south: crop.south, north: crop.north,
+      path: path, grid: crop.rawGrid,
+    };
+
+    if (NS.debugDrawPath) NS.debugDrawPath(newLocs.map((l, i) => l || path[i]), 'cyan');
+    context.perform(buildSnapAction(way.id, newLocs), 'Slide geometry to Strava heatmap');
+
+    console.log('[slide-v2] snapped to heatmap', {
       wayId: way.id,
-      nodesBefore: path.length,
-      wasmPoints: rawCount,
-      pointsAfter: corrected.length,
-      loops: res.loops,
-      gridSize: grid.width + 'x' + grid.height,
+      nodes: path.length,
+      mpp: +mpp.toFixed(2),
+      cropSize: crop.width + 'x' + crop.height,
       runtimeMs,
     });
   };
 
-  // Debug: download the exact last WASM input (grid + bound + path) as JSON so it can be replayed
-  // offline (wasm/replay_dump.mjs) against the REAL heatmap data instead of synthetic guesses.
-  // Usage: run a slide on the misbehaving trail, then `window.__slideV2.dumpLastSlide()`.
+  // Debug: download the last slide's heatmap crop + path as JSON so it can be replayed offline
+  // (wasm/run_dump_snap.mjs) against the REAL heatmap data instead of synthetic guesses.
+  // Usage: run a slide on the misbehaving trail, then `window.__slideV2.dumpLastSlide()` (or Alt+Shift+S).
   NS.dumpLastSlide = function () {
     const r = NS._lastSlide;
     if (!r) {
@@ -615,9 +667,8 @@
       east: r.east,
       south: r.south,
       north: r.north,
-      smoothingStdDev: r.smoothingStdDev,
       path: r.path,
-      gridBase64: btoa(bin),
+      gridBase64: btoa(bin), // UNMASKED heatmap crop
     };
     const blob = new Blob([JSON.stringify(dump)], { type: 'application/json' });
     const a = document.createElement('a');
