@@ -78,3 +78,8 @@ Thumbs.db
 [Dd]esktop.ini
 $RECYCLE.BIN/
 *.lnk
+
+### slide-v2 debug artifacts
+# Rendered heatmap diagnostics and captured slide dumps (NS.dumpLastSlide / Alt+Shift+S)
+wasm/*.png
+slide-dump*.json
