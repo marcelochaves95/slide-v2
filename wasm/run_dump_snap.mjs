@@ -77,7 +77,7 @@ for (const [sig, sr, pa] of [[4, 7, 1], [4, 7, 2], [5, 8, 2], [5, 10, 2]]) {
   const s = snap(sig, sr, pa); const d = devFromInput(s);
   console.log(`snap sig${sig} search${sr} smooth${pa}: dev max ${d.max.toFixed(0)}m mean ${d.mean.toFixed(0)}m | intensity ${intens(s).toFixed(0)} | turn ${turnDeg(s).toFixed(1)}`);
 }
-const snapped = snap(4, 7, 2);
+const snapped = snap(5, 10, 2);
 
 // render heat grid + input(yellow) + snapped(red)
 let gmax = 0; for (const v of grid) if (v > gmax) gmax = v;

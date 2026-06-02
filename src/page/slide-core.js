@@ -6,8 +6,8 @@
   NS.coreInstalled = true;
 
   // Options for the heatmap snap (all automatic by default; set only to override for debugging):
-  //   snapSigmaMeters   – how strongly the result stays on your drawn line (default 4)
-  //   snapSearchMeters  – how far perpendicular it looks for the band (default 7)
+  //   snapSigmaMeters   – how strongly the result stays on your drawn line (default 5)
+  //   snapSearchMeters  – how far perpendicular it looks for the band (default 10)
   //   snapSmoothPasses  – smoothing of the sideways offsets along the trail (default 2)
   NS.SNAP_OPTIONS = NS.SNAP_OPTIONS || {};
 
@@ -528,12 +528,12 @@
   // drawn line) — so a node already on the band stays put, an off node moves onto it, and a
   // farther/brighter feature (a nearby road) is down-weighted. Then the sideways OFFSETS are
   // smoothed along the trail to remove jitter without cutting curves. Conservative on purpose
-  // (σ≈4 m, search ±7 m): the result stays on the user's good hand trace. We KEEP the user's nodes
+  // (σ≈5 m, search ±10 m): the result stays close to the user's good hand trace. We KEEP the nodes
   // (just nudge each), instead of the old resample+refine that invented a drifting new line.
   // Tuned + validated on 3 real dumps (wasm/run_dump_snap.mjs). Returns pixels; endpoints unchanged.
   function snapToBand(surf, pxPath, mpp, opts) {
-    const sigmaPx = (opts.snapSigmaMeters != null ? opts.snapSigmaMeters : 4) / mpp;
-    const R = (opts.snapSearchMeters != null ? opts.snapSearchMeters : 7) / mpp;
+    const sigmaPx = (opts.snapSigmaMeters != null ? opts.snapSigmaMeters : 5) / mpp;
+    const R = (opts.snapSearchMeters != null ? opts.snapSearchMeters : 10) / mpp;
     const passes = opts.snapSmoothPasses != null ? opts.snapSmoothPasses : 2;
     const denom = 2 * sigmaPx * sigmaPx;
     const N = pxPath.length;
@@ -625,7 +625,7 @@
     );
 
     // Keep the raw heatmap crop + path for offline debugging (NS.dumpLastSlide / run_dump_snap.mjs).
-    const searchM = opts.snapSearchMeters != null ? opts.snapSearchMeters : 7;
+    const searchM = opts.snapSearchMeters != null ? opts.snapSearchMeters : 10;
     const crop = extractGrid(surf, pxPath, Math.ceil((searchM + 12) / mpp), 0);
     NS._lastSlide = {
       width: crop.width, height: crop.height,
