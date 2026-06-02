@@ -71,9 +71,9 @@
       path,
     });
 
-    if (NS.debugSampleHeatmap) {
-      NS.debugSampleHeatmap(context, path).catch((e) =>
-        console.warn('[slide-v2] heatmap sampling error', e)
+    if (NS.debugSurfacer) {
+      NS.debugSurfacer(context, path).catch((e) =>
+        console.warn('[slide-v2] surfacer error', e)
       );
     }
   }

@@ -137,6 +137,13 @@
       return [data[i], data[i + 1], data[i + 2], data[i + 3]];
     }
 
+    function pixelToLonLat(px, py) {
+      const lon = ((px + originX) / scale) * 360 - 180;
+      const n = Math.PI * (1 - (2 * (py + originY)) / scale);
+      const lat = (Math.atan(Math.sinh(n)) * 180) / Math.PI;
+      return [lon, lat];
+    }
+
     return {
       ok: true,
       template,
@@ -150,11 +157,186 @@
       width: W,
       height: H,
       pixelOf,
+      pixelToLonLat,
       rgbaAt,
     };
   }
 
   NS.buildSurface = buildSurface;
+
+  // --- Surfacer: turns the pixel grid into a cost surface with valueAt / gradientAt ---
+
+  // Suggested slide weights (from the Go stravaheat surfacer).
+  NS.SLIDE_OPTIONS = {
+    gradientScale: 0.5,
+    distanceScale: 0.2,
+    angleScale: 0.1,
+    momentumScale: 0.7,
+    smoothingMeters: 25,
+  };
+
+  function metersPerPixel(z, tileSize, lat) {
+    return (Math.cos((lat * Math.PI) / 180) * 40075016.686) / (tileSize * Math.pow(2, z));
+  }
+
+  // Fast Gaussian blur via 3 box-blur passes (Kutskir) — O(W*H) regardless of sigma.
+  function boxesForGauss(sigma, n) {
+    const wIdeal = Math.sqrt((12 * sigma * sigma) / n + 1);
+    let wl = Math.floor(wIdeal);
+    if (wl % 2 === 0) wl--;
+    const wu = wl + 2;
+    const mIdeal = (12 * sigma * sigma - n * wl * wl - 4 * n * wl - 3 * n) / (-4 * wl - 4);
+    const m = Math.round(mIdeal);
+    const sizes = [];
+    for (let i = 0; i < n; i++) sizes.push(i < m ? wl : wu);
+    return sizes;
+  }
+
+  function boxBlurH(src, dst, W, H, r) {
+    if (r < 1) {
+      dst.set(src);
+      return;
+    }
+    const norm = 1 / (2 * r + 1);
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      let sum = (r + 1) * src[row];
+      for (let x = 1; x <= r; x++) sum += src[row + (x < W ? x : W - 1)];
+      for (let x = 0; x < W; x++) {
+        dst[row + x] = sum * norm;
+        const add = x + r + 1;
+        const rem = x - r;
+        sum += src[row + (add < W ? add : W - 1)] - src[row + (rem > 0 ? rem : 0)];
+      }
+    }
+  }
+
+  function boxBlurV(src, dst, W, H, r) {
+    if (r < 1) {
+      dst.set(src);
+      return;
+    }
+    const norm = 1 / (2 * r + 1);
+    for (let x = 0; x < W; x++) {
+      let sum = (r + 1) * src[x];
+      for (let y = 1; y <= r; y++) sum += src[(y < H ? y : H - 1) * W + x];
+      for (let y = 0; y < H; y++) {
+        dst[y * W + x] = sum * norm;
+        const add = y + r + 1;
+        const rem = y - r;
+        sum += src[(add < H ? add : H - 1) * W + x] - src[(rem > 0 ? rem : 0) * W + x];
+      }
+    }
+  }
+
+  function gaussianBlur(src, W, H, sigma) {
+    const out = new Float32Array(src);
+    if (!(sigma > 0)) return out;
+    const tmp = new Float32Array(W * H);
+    for (const w of boxesForGauss(sigma, 3)) {
+      const r = (w - 1) / 2;
+      boxBlurH(out, tmp, W, H, r);
+      boxBlurV(tmp, out, W, H, r);
+    }
+    return out;
+  }
+
+  // surf: result of buildSurface. Returns a surfacer in heatmap pixel coords.
+  // valueAt = raw intensity (luma masked by alpha); gradientAt = gradient of the smoothed surface.
+  NS.makeSurfacer = function (surf, opts) {
+    opts = opts || {};
+    const W = surf.width;
+    const H = surf.height;
+    const data = surf.data;
+    const smoothingMeters =
+      opts.smoothingMeters != null ? opts.smoothingMeters : NS.SLIDE_OPTIONS.smoothingMeters;
+    const mpp = metersPerPixel(surf.z, surf.tileSize, opts.centerLat || 0);
+    const sigmaPx = smoothingMeters / mpp;
+
+    const raw = new Float32Array(W * H);
+    for (let i = 0, p = 0; i < raw.length; i++, p += 4) {
+      raw[i] = data[p + 3] > 0 ? data[p] / 255 : 0; // R (luma) masked by alpha
+    }
+    const smooth = gaussianBlur(raw, W, H, sigmaPx);
+
+    function sample(grid, x, y) {
+      if (x < 0) x = 0;
+      else if (x > W - 1) x = W - 1;
+      if (y < 0) y = 0;
+      else if (y > H - 1) y = H - 1;
+      const x0 = Math.floor(x);
+      const y0 = Math.floor(y);
+      const x1 = Math.min(x0 + 1, W - 1);
+      const y1 = Math.min(y0 + 1, H - 1);
+      const fx = x - x0;
+      const fy = y - y0;
+      const a = grid[y0 * W + x0];
+      const b = grid[y0 * W + x1];
+      const c = grid[y1 * W + x0];
+      const d = grid[y1 * W + x1];
+      return a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy;
+    }
+
+    return {
+      W,
+      H,
+      mpp,
+      sigmaPx,
+      raw,
+      smooth,
+      valueAt: (px, py) => sample(raw, px, py),
+      smoothAt: (px, py) => sample(smooth, px, py),
+      gradientAt: (px, py) => [
+        (sample(smooth, px + 1, py) - sample(smooth, px - 1, py)) / 2,
+        (sample(smooth, px, py + 1) - sample(smooth, px, py - 1)) / 2,
+      ],
+    };
+  };
+
+  // Part 6 verification: build the surfacer and check the gradient ascends toward the heatmap.
+  NS.debugSurfacer = async function (context, path, opts) {
+    const surf = await buildSurface(context, path, opts);
+    if (!surf.ok) {
+      console.warn('[slide-v2] surfacer build failed:', surf.reason, surf);
+      return surf;
+    }
+    const centerLat = path.reduce((a, p) => a + p[1], 0) / path.length;
+    console.time('[slide-v2] smoothing');
+    const surfacer = NS.makeSurfacer(surf, { centerLat });
+    console.timeEnd('[slide-v2] smoothing');
+
+    let ascends = 0;
+    let withGrad = 0;
+    let sumV = 0;
+    let sumG = 0;
+    const samples = [];
+    for (const [lon, lat] of path) {
+      const [px, py] = surf.pixelOf(lon, lat);
+      const v = surfacer.valueAt(px, py);
+      const [gx, gy] = surfacer.gradientAt(px, py);
+      const gmag = Math.hypot(gx, gy);
+      sumV += v;
+      sumG += gmag;
+      if (gmag > 1e-6) {
+        withGrad++;
+        const s = surfacer.smoothAt(px, py);
+        const s2 = surfacer.smoothAt(px + gx / gmag, py + gy / gmag); // step 1px uphill
+        if (s2 >= s - 1e-9) ascends++;
+      }
+      if (samples.length < 8) {
+        samples.push({ v: +v.toFixed(3), gx: +gx.toFixed(4), gy: +gy.toFixed(4) });
+      }
+    }
+    console.log('[slide-v2] surfacer OK', {
+      sigmaPx: +surfacer.sigmaPx.toFixed(1),
+      metersPerPixel: +surfacer.mpp.toFixed(2),
+      avgValue: +(sumV / path.length).toFixed(3),
+      avgGradMag: +(sumG / path.length).toFixed(4),
+      gradientAscends: withGrad ? ascends + '/' + withGrad : 'no gradient',
+      samples,
+    });
+    return { surf, surfacer };
+  };
 
   function stat(vals) {
     if (!vals.length) return null;
