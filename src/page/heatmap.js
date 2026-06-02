@@ -260,46 +260,6 @@
   // keep the old name working
   NS.debugSurfaceOverlay = NS.debugHeatOverlay;
 
-  // Debug: draw a lon/lat polyline (cyan) over the map — used to see the algorithm's raw output
-  // before it is applied to iD, positioned with iD's own projection.
-  NS.debugDrawPath = function (lonlatPath, color) {
-    const context = NS.getContext && NS.getContext();
-    if (!context || !lonlatPath || !lonlatPath.length) return;
-    const host =
-      context.container().select('.main-map').node() || context.container().node();
-    if (!host) return;
-    const rect = host.getBoundingClientRect();
-    const old = document.getElementById('slidev2-debug-path');
-    if (old) old.remove();
-    const cv = document.createElement('canvas');
-    cv.id = 'slidev2-debug-path';
-    cv.width = rect.width;
-    cv.height = rect.height;
-    cv.style.position = 'absolute';
-    cv.style.left = '0';
-    cv.style.top = '0';
-    cv.style.pointerEvents = 'none';
-    cv.style.zIndex = '5001';
-    const cx = cv.getContext('2d');
-    cx.strokeStyle = color || 'cyan';
-    cx.fillStyle = color || 'cyan';
-    cx.lineWidth = 2;
-    cx.beginPath();
-    lonlatPath.forEach((ll, i) => {
-      const p = context.projection(ll);
-      if (i === 0) cx.moveTo(p[0], p[1]);
-      else cx.lineTo(p[0], p[1]);
-    });
-    cx.stroke();
-    lonlatPath.forEach((ll) => {
-      const p = context.projection(ll);
-      cx.beginPath();
-      cx.arc(p[0], p[1], 3, 0, 2 * Math.PI);
-      cx.fill();
-    });
-    host.appendChild(cv);
-  };
-
   // --- Surfacer: turns the pixel grid into a cost surface with valueAt / gradientAt ---
 
   // Suggested slide weights (from the Go stravaheat surfacer).

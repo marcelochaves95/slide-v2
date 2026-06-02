@@ -632,7 +632,6 @@
       path: path, grid: crop.rawGrid, template: surf.template,
     };
 
-    if (NS.debugDrawPath) NS.debugDrawPath(newLocs.map((l, i) => l || path[i]), 'cyan');
     context.perform(buildSnapAction(way.id, newLocs), 'Slide geometry to Strava heatmap');
 
     console.log('[slide-v2] snapped to heatmap', {
