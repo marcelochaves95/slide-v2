@@ -6,7 +6,15 @@
   "action": {
     "default_title": "slide-v2"
   },
+  "minimum_chrome_version": "111",
   "content_scripts": [
+    {
+      "matches": ["*://www.openstreetmap.org/id*"],
+      "js": ["src/page/capture-context.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
     {
       "matches": ["*://www.openstreetmap.org/id*"],
       "js": ["src/content/content.js"],
