@@ -36,13 +36,25 @@ function snap(sigmaM, searchM, passes) {
     let tx = inPx[i + 1][0] - inPx[i - 1][0], ty = inPx[i + 1][1] - inPx[i - 1][1];
     const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
     const nx = -ty, ny = tx; perp[i] = [nx, ny];
-    let bestScore = -1, off = 0;
-    for (let s = -R; s <= R; s += 0.25) {
-      const v = sample(inPx[i][0] + nx * s, inPx[i][1] + ny * s);
-      const score = v * Math.exp(-(s * s) / denom);
-      if (score > bestScore) { bestScore = score; off = s; }
+    // PERPENDICULAR HILL-CLIMB to the local band ridge: step toward higher intensity until the
+    // crest (hot center) — reaches a far center but won't cross a valley to a separate band.
+    const px0 = inPx[i][0], py0 = inPx[i][1];
+    const ss = (s) => sample(px0 + nx * s, py0 + ny * s);
+    let off = 0, cur = ss(0), step = 1.0;
+    for (let k = 0; k < Math.ceil(R / step) * 2; k++) {
+      const vP = ss(off + step), vM = ss(off - step);
+      if (vP > cur + 1 && vP >= vM) { off += step; cur = vP; }
+      else if (vM > cur + 1) { off -= step; cur = vM; }
+      else break;
+      if (Math.abs(off) >= R) break;
     }
-    offs[i] = off;
+    // center on the contiguous near-peak PLATEAU around the landing point, so a wide flat-top band
+    // lands on the MIDDLE, not the near edge where the climb first stopped.
+    const thr = cur - Math.max(3, 0.08 * cur);
+    let l = off, r = off;
+    while (l - step >= -R && ss(l - step) >= thr) l -= step;
+    while (r + step <= R && ss(r + step) >= thr) r += step;
+    offs[i] = (l + r) / 2;
   }
   for (let p = 0; p < (passes || 0); p++) { // smooth offsets along the trail (endpoints stay 0)
     const q = offs.slice();
@@ -73,11 +85,11 @@ function turnDeg(px) { let t = 0, n = 0; for (let i = 1; i < px.length - 1; i++)
 
 console.log(`${file.split(/[\\/]/).pop()}  ${W}x${H}  ${M_PER_PX.toFixed(2)} m/px  nodes=${input.length}`);
 console.log(`INPUT: intensity ${intens(inPx).toFixed(0)}, turn ${turnDeg(inPx).toFixed(1)}`);
-for (const [sig, sr, pa] of [[4, 7, 1], [4, 7, 2], [5, 8, 2], [5, 10, 2]]) {
+for (const [sig, sr, pa] of [[0, 10, 2], [0, 15, 2], [0, 20, 2], [0, 25, 2], [0, 20, 3]]) {
   const s = snap(sig, sr, pa); const d = devFromInput(s);
-  console.log(`snap sig${sig} search${sr} smooth${pa}: dev max ${d.max.toFixed(0)}m mean ${d.mean.toFixed(0)}m | intensity ${intens(s).toFixed(0)} | turn ${turnDeg(s).toFixed(1)}`);
+  console.log(`FWHM-center window${sr} smooth${pa}: dev max ${d.max.toFixed(0)}m mean ${d.mean.toFixed(0)}m | intensity ${intens(s).toFixed(0)} | turn ${turnDeg(s).toFixed(1)}`);
 }
-const snapped = snap(5, 10, 2);
+const snapped = snap(0, 20, 2);
 
 // render heat grid + input(yellow) + snapped(red)
 let gmax = 0; for (const v of grid) if (v > gmax) gmax = v;

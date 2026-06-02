@@ -31,11 +31,24 @@
     return null;
   }
 
-  // Use the gray color scheme so pixel luminance ~= activity intensity.
+  // Use the gray color scheme so pixel luminance ~= activity intensity. IMPORTANT: keep the SAME
+  // activity type (all/ride/run/winter/water) as the heatmap the user is viewing — only the color
+  // changes to gray. If we can't find the active template we fall back to "all", which may NOT match
+  // what the user sees (different bands) — that mismatch would make the slide read the wrong heatmap.
   function grayTemplate(context) {
     const active = findStravaTemplate(context);
-    if (active) return active.replace(/(identified\/globalheat\/[^/]+\/)[^/]+/, '$1gray');
-    return 'https://content-a.strava.com/identified/globalheat/all/gray/{z}/{x}/{y}.png?v=19';
+    if (active) {
+      const gray = active.replace(/(identified\/globalheat\/[^/]+\/)[^/]+/, '$1gray');
+      console.log('[slide-v2] heatmap: active template found, reading', gray);
+      return gray;
+    }
+    const fallback = 'https://content-a.strava.com/identified/globalheat/all/gray/{z}/{x}/{y}.png?v=19';
+    console.warn(
+      '[slide-v2] heatmap: could NOT find the active Strava overlay — falling back to "all/gray".',
+      'If your blue heatmap is a different sport (Ride/Run/Winter/Water), the bands WON\'T match. Using:',
+      fallback
+    );
+    return fallback;
   }
 
   function tileUrl(template, x, y, z) {
@@ -164,9 +177,19 @@
 
   NS.buildSurface = buildSurface;
 
-  // Debug: draw our heatmap surface (magenta) over the iD map, positioned via iD's own
-  // projection. If it lines up with the blue heatmap, our coords are right; a shift IS the bug.
-  NS.debugSurfaceOverlay = async function () {
+  // Debug: paint OUR heatmap surface (the gray intensity the slide reads) over the iD map as a
+  // heat colormap (black→red→yellow→white = hottest), semi-transparent so the blue heatmap shows
+  // through. Lets you SEE the same reference as the offline images and verify the trail sits on the
+  // hot core. If this heat overlay doesn't line up with the blue heatmap, our coords are off.
+  // Toggle: call again (or Alt+Shift+H) to remove. NOTE: it's a snapshot of the current view —
+  // after panning/zooming, toggle off+on to reposition.
+  NS.debugHeatOverlay = async function () {
+    const existing = document.getElementById('slidev2-debug-overlay');
+    if (existing) {
+      existing.remove();
+      console.log('[slide-v2] heat overlay OFF');
+      return;
+    }
     const context = NS.getContext && NS.getContext();
     if (!context) {
       console.warn('[slide-v2] no iD context');
@@ -181,8 +204,11 @@
     } catch (err) {
       /* ignore */
     }
+    // Fall back to the last slid trail, so you can toggle the overlay right after a slide without
+    // re-selecting the way.
+    if (!path && NS._lastSlide && NS._lastSlide.path) path = NS._lastSlide.path;
     if (!path) {
-      console.warn('[slide-v2] select a single way first, then run this again');
+      console.warn('[slide-v2] select a single way (trail) first (or run a slide), then toggle again');
       return;
     }
     const surf = await buildSurface(context, path);
@@ -197,11 +223,18 @@
     const img = cx.createImageData(surf.width, surf.height);
     const d = surf.data;
     const o = img.data;
+    let gmax = 1;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 0 && d[i] > gmax) gmax = d[i];
     for (let i = 0; i < d.length; i += 4) {
-      o[i] = 255;
-      o[i + 1] = 0;
-      o[i + 2] = 255;
-      o[i + 3] = d[i + 3] > 0 ? Math.min(200, d[i]) : 0;
+      if (d[i + 3] > 0) {
+        const t = (d[i] / gmax) * 3; // hot colormap, normalized to the local max
+        o[i] = Math.max(0, Math.min(255, t * 255));
+        o[i + 1] = Math.max(0, Math.min(255, (t - 1) * 255));
+        o[i + 2] = Math.max(0, Math.min(255, (t - 2) * 255));
+        o[i + 3] = 150; // semi-transparent so the blue heatmap underneath shows for comparison
+      } else {
+        o[i + 3] = 0;
+      }
     }
     cx.putImageData(img, 0, 0);
 
@@ -212,20 +245,20 @@
     cv.style.top = Math.min(p1[1], p2[1]) + 'px';
     cv.style.width = Math.abs(p2[0] - p1[0]) + 'px';
     cv.style.height = Math.abs(p2[1] - p1[1]) + 'px';
+    cv.style.imageRendering = 'pixelated';
     cv.style.pointerEvents = 'none';
-    cv.style.opacity = '0.85';
     cv.style.zIndex = '5000';
     cv.id = 'slidev2-debug-overlay';
 
-    const existing = document.getElementById('slidev2-debug-overlay');
-    if (existing) existing.remove();
     const host =
       context.container().select('.main-map').node() ||
       context.container().node() ||
       document.body;
     host.appendChild(cv);
-    console.log('[slide-v2] surface overlay drawn (magenta). Compare with the blue heatmap. To remove: document.getElementById("slidev2-debug-overlay").remove()');
+    console.log('[slide-v2] heat overlay ON (white = hottest). The trail should sit on the white core. Alt+Shift+H toggles; after panning, toggle off+on.');
   };
+  // keep the old name working
+  NS.debugSurfaceOverlay = NS.debugHeatOverlay;
 
   // Debug: draw a lon/lat polyline (cyan) over the map — used to see the algorithm's raw output
   // before it is applied to iD, positioned with iD's own projection.

@@ -6,8 +6,7 @@
   NS.coreInstalled = true;
 
   // Options for the heatmap snap (all automatic by default; set only to override for debugging):
-  //   snapSigmaMeters   – how strongly the result stays on your drawn line (default 5)
-  //   snapSearchMeters  – how far perpendicular it looks for the band (default 10)
+  //   snapSearchMeters  – max distance a node may move perpendicular to reach the band center (default 15)
   //   snapSmoothPasses  – smoothing of the sideways offsets along the trail (default 2)
   NS.SNAP_OPTIONS = NS.SNAP_OPTIONS || {};
 
@@ -523,19 +522,16 @@
     );
   }
 
-  // Snap each interior node onto the local heatmap band. For each node we look PERPENDICULAR to the
-  // trail and move it to the best band point — argmax of intensity × gaussian(distance from the
-  // drawn line) — so a node already on the band stays put, an off node moves onto it, and a
-  // farther/brighter feature (a nearby road) is down-weighted. Then the sideways OFFSETS are
-  // smoothed along the trail to remove jitter without cutting curves. Conservative on purpose
-  // (σ≈5 m, search ±10 m): the result stays close to the user's good hand trace. We KEEP the nodes
-  // (just nudge each), instead of the old resample+refine that invented a drifting new line.
-  // Tuned + validated on 3 real dumps (wasm/run_dump_snap.mjs). Returns pixels; endpoints unchanged.
+  // Snap each interior node onto the CENTER of the heatmap band (Marcelo's idea: "map the heatmap
+  // center and put the trail on it"). For each node we hill-climb PERPENDICULAR to the trail toward
+  // higher intensity until the local ridge (band center), so it reaches the hot center even when the
+  // trace is on the band's shoulder several metres away — but stops at the first crest so it won't
+  // cross a valley to a separate band. Sideways offsets are smoothed along the trail to remove
+  // jitter. We KEEP his nodes (just move each to the center). Endpoints unchanged. Returns pixels.
   function snapToBand(surf, pxPath, mpp, opts) {
-    const sigmaPx = (opts.snapSigmaMeters != null ? opts.snapSigmaMeters : 5) / mpp;
-    const R = (opts.snapSearchMeters != null ? opts.snapSearchMeters : 10) / mpp;
+    const maxOff = (opts.snapSearchMeters != null ? opts.snapSearchMeters : 15) / mpp;
     const passes = opts.snapSmoothPasses != null ? opts.snapSmoothPasses : 2;
-    const denom = 2 * sigmaPx * sigmaPx;
+    const step = 1; // ~1 px (~mpp meters) per climb step
     const N = pxPath.length;
     const offs = new Float64Array(N);
     const perp = new Array(N).fill(null);
@@ -545,13 +541,29 @@
       const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
       const nx = -ty, ny = tx; // perpendicular to the local trail direction
       perp[i] = [nx, ny];
-      let best = 0, off = 0; // best=0 so an empty perpendicular (no heatmap) leaves the node put
-      for (let s = -R; s <= R; s += 0.25) {
-        const v = sampleSurf(surf, pxPath[i][0] + nx * s, pxPath[i][1] + ny * s);
-        const score = v * Math.exp(-(s * s) / denom);
-        if (score > best) { best = score; off = s; }
+      const px0 = pxPath[i][0], py0 = pxPath[i][1];
+      const ss = (s) => sampleSurf(surf, px0 + nx * s, py0 + ny * s);
+      // Hill-climb perpendicular toward higher intensity until the local band RIDGE = the heatmap
+      // CENTER (Marcelo's idea: put the node on the hottest center). Reaches a center several metres
+      // away but stops at the first crest, so it won't cross a valley to a separate band. +1
+      // threshold skips flat noise; an empty perpendicular leaves the node put.
+      let off = 0, cur = ss(0);
+      const maxK = Math.ceil(maxOff / step) * 2;
+      for (let k = 0; k < maxK; k++) {
+        const vP = ss(off + step), vM = ss(off - step);
+        if (vP > cur + 1 && vP >= vM) { off += step; cur = vP; }
+        else if (vM > cur + 1) { off -= step; cur = vM; }
+        else break;
+        if (Math.abs(off) >= maxOff) break;
       }
-      offs[i] = off;
+      // Center on the contiguous near-peak PLATEAU around the landing point, so a wide flat-topped
+      // band lands on the MIDDLE (not the near edge where the climb first stopped). Harmless on
+      // narrow bands (plateau ~= the peak).
+      const thr = cur - Math.max(3, 0.08 * cur);
+      let l = off, r = off;
+      while (l - step >= -maxOff && ss(l - step) >= thr) l -= step;
+      while (r + step <= maxOff && ss(r + step) >= thr) r += step;
+      offs[i] = (l + r) / 2;
     }
     for (let p = 0; p < passes; p++) { // smooth the offsets along the trail (endpoints stay 0)
       const q = offs.slice();
@@ -615,6 +627,10 @@
     const opts = NS.SNAP_OPTIONS;
     const pxPath = path.map(([lon, lat]) => surf.pixelOf(lon, lat));
 
+    // Snap each of the user's interior nodes onto the band (conservative, biased to the drawn
+    // line). KEEPS the user's nodes (IDs/count/order) — their trace already captures the intended
+    // shape (incl. sharp dips), so we just nudge each node; we do NOT resample/reshape (that cut
+    // sharp features and threw away their nodes).
     const t0 = performance.now();
     const snappedPx = snapToBand(surf, pxPath, mpp, opts);
     const runtimeMs = Math.round(performance.now() - t0);
@@ -625,12 +641,11 @@
     );
 
     // Keep the raw heatmap crop + path for offline debugging (NS.dumpLastSlide / run_dump_snap.mjs).
-    const searchM = opts.snapSearchMeters != null ? opts.snapSearchMeters : 10;
-    const crop = extractGrid(surf, pxPath, Math.ceil((searchM + 12) / mpp), 0);
+    const crop = extractGrid(surf, pxPath, Math.ceil(30 / mpp), 0);
     NS._lastSlide = {
       width: crop.width, height: crop.height,
       west: crop.west, east: crop.east, south: crop.south, north: crop.north,
-      path: path, grid: crop.rawGrid,
+      path: path, grid: crop.rawGrid, template: surf.template,
     };
 
     if (NS.debugDrawPath) NS.debugDrawPath(newLocs.map((l, i) => l || path[i]), 'cyan');
@@ -668,6 +683,7 @@
       south: r.south,
       north: r.north,
       path: r.path,
+      template: r.template,
       gridBase64: btoa(bin), // UNMASKED heatmap crop
     };
     const blob = new Blob([JSON.stringify(dump)], { type: 'application/json' });

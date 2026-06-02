@@ -69,20 +69,26 @@
   }
   NS.runSlide = runSlide;
 
-  // --- Alt+S = slide;  Alt+Shift+S = dump last slide (debug) ---
-  // The handler runs in the iD iframe's MAIN world, so the dump works without fiddling with the
-  // DevTools console "context" selector (which has bitten us repeatedly).
+  // --- Alt+S = slide;  Alt+Shift+S = dump last slide;  Alt+Shift+H = toggle heatmap overlay ---
+  // Handlers run in the iD iframe's MAIN world, so they work without fiddling with the DevTools
+  // console "context" selector (which has bitten us repeatedly).
   window.addEventListener(
     'keydown',
     (e) => {
-      if (!(e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyS')) return;
+      if (!(e.altKey && !e.ctrlKey && !e.metaKey)) return;
+      const isS = e.code === 'KeyS';
+      const isH = e.code === 'KeyH';
+      if (!isS && !isH) return;
       const t = e.target;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
         return;
       }
       e.preventDefault();
       e.stopPropagation();
-      if (e.shiftKey) {
+      if (isH) {
+        if (NS.debugHeatOverlay) NS.debugHeatOverlay();
+        else console.warn('[slide-v2] heat overlay unavailable');
+      } else if (e.shiftKey) {
         if (NS.dumpLastSlide) NS.dumpLastSlide();
         else console.warn('[slide-v2] dumpLastSlide unavailable — slide a way first');
       } else {
@@ -170,5 +176,5 @@
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
-  console.log('[slide-v2] slide ready — Alt+S to slide (or edit menu); Alt+Shift+S to dump (debug)');
+  console.log('[slide-v2] slide ready — Alt+S slide (or edit menu); Alt+Shift+S dump; Alt+Shift+H heatmap overlay');
 })();
