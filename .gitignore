@@ -1,85 +1,23 @@
-### Editors
+# Editors
 .vscode/
 .idea/
 
-### Go
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool
-*.out
-
-# Go workspace file
-go.work.sum
-
-### Node
-# Dependencies
-node_modules/
-
-# Logs
-*.log
-
-# Runtime data
-*.pid
-*.pid.lock
-
-# Coverage
-coverage/
-*.lcov
-.nyc_output
-
-# Build output
-dist/
-build/Release
-
-# TypeScript cache
-*.tsbuildinfo
-
-# Framework build output and caches
-.cache
-.parcel-cache
-.next
-out/
-.nuxt
-
-# dotenv environment variable files
+# Secrets, logs, deps (no build yet, but kept for safety)
 .env
 .env.local
 .env.*.local
+*.log
+node_modules/
 
-# npm / yarn
-.npm
-*.tgz
-.yarn/cache
-.yarn/unplugged
-.yarn/install-state.gz
-.pnp.*
-
-### macOS
+# macOS
 .DS_Store
 ._*
-.Spotlight-V100
-.Trashes
-.DocumentRevisions-V100
-.fseventsd
-.TemporaryItems
-.VolumeIcon.icns
-.com.apple.timemachine.donotpresent
 
-### Windows
+# Windows
 Thumbs.db
 [Dd]esktop.ini
 $RECYCLE.BIN/
 *.lnk
 
-### slide-v2 debug artifacts
-# Rendered heatmap diagnostics and captured slide dumps (NS.dumpLastSlide / Alt+Shift+S)
-wasm/*.png
+# slide-v2 debug dumps (NS.dumpLastSlide / Alt+Shift+S)
 slide-dump*.json
