@@ -6,7 +6,8 @@
   NS.coreInstalled = true;
 
   // Options for the heatmap snap (all automatic by default; set only to override for debugging):
-  //   snapSearchMeters  – max distance a node may move perpendicular to reach the band center (default 15)
+  //   snapSearchMeters  – half-window searched perpendicular for the local band (default 7)
+  //   snapSigmaMeters   – how strongly the result stays on the drawn line (default 4)
   //   snapSmoothPasses  – smoothing of the sideways offsets along the trail (default 2)
   NS.SNAP_OPTIONS = NS.SNAP_OPTIONS || {};
 
@@ -279,9 +280,6 @@
     };
   }
 
-  // Full pipeline: read the way, slide it to the heatmap, and apply the result to iD (undoable).
-  // Extract a heatmap intensity grid (Uint8Array, row 0 = north, col 0 = west) for the path
-  // bbox + margin, plus its lon/lat bounds, to feed the Go WASM surfacer.
   // Squared distance from a point to a polyline (pixels).
   function distToPolyline2(px, py, poly) {
     let best = Infinity;
@@ -325,10 +323,9 @@
     }
     // Soft corridor: weight intensity by closeness to the drawn line (× e^(−d²/2σ²)). The hand
     // trace is reliable, so a dim-but-close trail outscores a bright-but-far road — the slide
-    // polishes LOCALLY instead of being dragged onto brighter nearby roads/trails. Tuned on real
-    // dumps (wasm/run_dump_soft.mjs): σ≈5 m handles road-pull, a parallel road ~7 m away, and
-    // bumpy-band kinks. Beyond 3.5σ the weight is ~0, so we hard-cut there to save work.
-    // Keep rawGrid (unmasked) for offline debugging (the weighted grid hides nearby roads).
+    // polishes LOCALLY instead of being dragged onto brighter nearby roads/trails. Beyond 3.5σ the
+    // weight is ~0, so we hard-cut there to save work. (Currently unused: callers pass corridorSigmaPx
+    // = 0; kept for experimentation.) Keep rawGrid (unmasked) for offline debugging.
     const grid = rawGrid.slice();
     if (corridorSigmaPx > 0) {
       const local = pxPath.map(([px, py]) => [px - ox, py - oy]);
@@ -522,16 +519,17 @@
     );
   }
 
-  // Snap each interior node onto the CENTER of the heatmap band (Marcelo's idea: "map the heatmap
-  // center and put the trail on it"). For each node we hill-climb PERPENDICULAR to the trail toward
-  // higher intensity until the local ridge (band center), so it reaches the hot center even when the
-  // trace is on the band's shoulder several metres away — but stops at the first crest so it won't
-  // cross a valley to a separate band. Sideways offsets are smoothed along the trail to remove
-  // jitter. We KEEP his nodes (just move each to the center). Endpoints unchanged. Returns pixels.
+  // Snap each interior node onto its LOCAL band — a small, conservative refinement that keeps the
+  // result on the trail the user traced (this is the "melhor resultado" config Marcelo preferred).
+  // For each node, take the brightest point within a SMALL perpendicular window (±`snapSearchMeters`),
+  // gaussian-biased to the drawn line (`snapSigmaMeters`), so it nudges onto the local band but stays
+  // near his trace and won't hop to a brighter neighbour (road/parallel trail). Sideways offsets are
+  // smoothed along the trail to remove jitter. We KEEP his nodes (just nudge each). Endpoints unchanged.
   function snapToBand(surf, pxPath, mpp, opts) {
-    const maxOff = (opts.snapSearchMeters != null ? opts.snapSearchMeters : 15) / mpp;
+    const sigmaPx = (opts.snapSigmaMeters != null ? opts.snapSigmaMeters : 4) / mpp;
+    const R = (opts.snapSearchMeters != null ? opts.snapSearchMeters : 7) / mpp;
     const passes = opts.snapSmoothPasses != null ? opts.snapSmoothPasses : 2;
-    const step = 1; // ~1 px (~mpp meters) per climb step
+    const denom = 2 * sigmaPx * sigmaPx;
     const N = pxPath.length;
     const offs = new Float64Array(N);
     const perp = new Array(N).fill(null);
@@ -541,29 +539,15 @@
       const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
       const nx = -ty, ny = tx; // perpendicular to the local trail direction
       perp[i] = [nx, ny];
-      const px0 = pxPath[i][0], py0 = pxPath[i][1];
-      const ss = (s) => sampleSurf(surf, px0 + nx * s, py0 + ny * s);
-      // Hill-climb perpendicular toward higher intensity until the local band RIDGE = the heatmap
-      // CENTER (Marcelo's idea: put the node on the hottest center). Reaches a center several metres
-      // away but stops at the first crest, so it won't cross a valley to a separate band. +1
-      // threshold skips flat noise; an empty perpendicular leaves the node put.
-      let off = 0, cur = ss(0);
-      const maxK = Math.ceil(maxOff / step) * 2;
-      for (let k = 0; k < maxK; k++) {
-        const vP = ss(off + step), vM = ss(off - step);
-        if (vP > cur + 1 && vP >= vM) { off += step; cur = vP; }
-        else if (vM > cur + 1) { off -= step; cur = vM; }
-        else break;
-        if (Math.abs(off) >= maxOff) break;
+      // brightest point within ±R, weighted by closeness to the drawn line; best=0 so an empty
+      // perpendicular (no heatmap) leaves the node put.
+      let best = 0, off = 0;
+      for (let s = -R; s <= R; s += 0.25) {
+        const v = sampleSurf(surf, pxPath[i][0] + nx * s, pxPath[i][1] + ny * s);
+        const score = v * Math.exp(-(s * s) / denom);
+        if (score > best) { best = score; off = s; }
       }
-      // Center on the contiguous near-peak PLATEAU around the landing point, so a wide flat-topped
-      // band lands on the MIDDLE (not the near edge where the climb first stopped). Harmless on
-      // narrow bands (plateau ~= the peak).
-      const thr = cur - Math.max(3, 0.08 * cur);
-      let l = off, r = off;
-      while (l - step >= -maxOff && ss(l - step) >= thr) l -= step;
-      while (r + step <= maxOff && ss(r + step) >= thr) r += step;
-      offs[i] = (l + r) / 2;
+      offs[i] = off;
     }
     for (let p = 0; p < passes; p++) { // smooth the offsets along the trail (endpoints stay 0)
       const q = offs.slice();
@@ -660,8 +644,7 @@
     });
   };
 
-  // Debug: download the last slide's heatmap crop + path as JSON so it can be replayed offline
-  // (wasm/run_dump_snap.mjs) against the REAL heatmap data instead of synthetic guesses.
+  // Debug: download the last slide's heatmap crop + path as JSON for offline inspection.
   // Usage: run a slide on the misbehaving trail, then `window.__slideV2.dumpLastSlide()` (or Alt+Shift+S).
   NS.dumpLastSlide = function () {
     const r = NS._lastSlide;

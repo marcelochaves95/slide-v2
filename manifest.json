@@ -31,29 +31,10 @@
     },
     {
       "matches": ["*://www.openstreetmap.org/id*"],
-      "js": ["src/page/wasm-loader.js"],
-      "run_at": "document_idle",
-      "all_frames": true,
-      "world": "MAIN"
-    },
-    {
-      "matches": ["*://www.openstreetmap.org/id*"],
       "js": ["src/page/slide-operation.js"],
       "run_at": "document_idle",
       "all_frames": true,
       "world": "MAIN"
-    },
-    {
-      "matches": ["*://www.openstreetmap.org/id*"],
-      "js": ["src/content/content.js"],
-      "run_at": "document_idle",
-      "all_frames": true
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["src/wasm/slide.wasm", "src/wasm/wasm_exec.js"],
-      "matches": ["*://www.openstreetmap.org/*"]
     }
   ]
 }
