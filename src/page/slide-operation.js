@@ -70,6 +70,12 @@
       last: path[path.length - 1],
       path,
     });
+
+    if (NS.debugSampleHeatmap) {
+      NS.debugSampleHeatmap(context, path).catch((e) =>
+        console.warn('[slide-v2] heatmap sampling error', e)
+      );
+    }
   }
   NS.runSlide = runSlide;
 
