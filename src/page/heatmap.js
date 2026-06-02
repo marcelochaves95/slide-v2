@@ -168,11 +168,18 @@
 
   // Suggested slide weights (from the Go stravaheat surfacer).
   NS.SLIDE_OPTIONS = {
-    gradientScale: 0.5,
+    gradientScale: 10, // [0,1] pixel-space surface needs a bigger scale than the Go mercator default (0.5) — tune
     distanceScale: 0.2,
     angleScale: 0.1,
     momentumScale: 0.7,
     smoothingMeters: 25,
+    resampleMeters: 5,
+    trimRadiusMeters: 15,
+    simplifyTolMeters: 1,
+    minLoops: 100,
+    maxLoops: 4000,
+    thresholdEpsilon: 0.0005,
+    scoreSmoothing: 0.2,
   };
 
   function metersPerPixel(z, tileSize, lat) {

@@ -71,9 +71,9 @@
       path,
     });
 
-    if (NS.debugSurfacer) {
-      NS.debugSurfacer(context, path).catch((e) =>
-        console.warn('[slide-v2] surfacer error', e)
+    if (NS.debugSlide) {
+      NS.debugSlide(context, path).catch((e) =>
+        console.warn('[slide-v2] slide error', e)
       );
     }
   }
