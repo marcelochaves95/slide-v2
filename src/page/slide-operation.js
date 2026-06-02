@@ -55,31 +55,23 @@
       return;
     }
 
-    const nodes = context.graph().childNodes(way);
-    const path = nodes.map((n) => n.loc); // [lon, lat]
-    if (path.length < 2) {
+    if (context.graph().childNodes(way).length < 2) {
       console.info('[slide-v2] selected way has fewer than 2 nodes');
       return;
     }
 
-    console.log('[slide-v2] slide requested (stub)', {
-      wayId: way.id,
-      tags: way.tags && (way.tags.name || way.tags.highway || way.tags.surface),
-      nodeCount: path.length,
-      first: path[0],
-      last: path[path.length - 1],
-      path,
-    });
-
-    if (NS.debugSlide) {
-      NS.debugSlide(context, path).catch((e) =>
-        console.warn('[slide-v2] slide error', e)
-      );
+    if (!NS.slideAndApply) {
+      console.warn('[slide-v2] slide core not loaded');
+      return;
     }
+
+    NS.slideAndApply(context, way).catch((e) => console.warn('[slide-v2] slide error', e));
   }
   NS.runSlide = runSlide;
 
-  // --- Alt+S shortcut ---
+  // --- Alt+S = slide;  Alt+Shift+S = dump last slide (debug) ---
+  // The handler runs in the iD iframe's MAIN world, so the dump works without fiddling with the
+  // DevTools console "context" selector (which has bitten us repeatedly).
   window.addEventListener(
     'keydown',
     (e) => {
@@ -90,7 +82,12 @@
       }
       e.preventDefault();
       e.stopPropagation();
-      runSlide();
+      if (e.shiftKey) {
+        if (NS.dumpLastSlide) NS.dumpLastSlide();
+        else console.warn('[slide-v2] dumpLastSlide unavailable — slide a way first');
+      } else {
+        runSlide();
+      }
     },
     true
   );
@@ -173,5 +170,5 @@
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
-  console.log('[slide-v2] slide operation ready — select a line and press Alt+S (or use the edit menu)');
+  console.log('[slide-v2] slide ready — Alt+S to slide (or edit menu); Alt+Shift+S to dump (debug)');
 })();

@@ -164,109 +164,224 @@
 
   NS.buildSurface = buildSurface;
 
+  // Debug: draw our heatmap surface (magenta) over the iD map, positioned via iD's own
+  // projection. If it lines up with the blue heatmap, our coords are right; a shift IS the bug.
+  NS.debugSurfaceOverlay = async function () {
+    const context = NS.getContext && NS.getContext();
+    if (!context) {
+      console.warn('[slide-v2] no iD context');
+      return;
+    }
+    let path;
+    try {
+      const ids = (context.selectedIDs && context.selectedIDs()) || [];
+      const graph = context.graph();
+      const e = ids.length === 1 && graph.hasEntity(ids[0]);
+      if (e && e.type === 'way') path = graph.childNodes(e).map((n) => n.loc);
+    } catch (err) {
+      /* ignore */
+    }
+    if (!path) {
+      console.warn('[slide-v2] select a single way first, then run this again');
+      return;
+    }
+    const surf = await buildSurface(context, path);
+    if (!surf.ok) {
+      console.warn('[slide-v2] surface:', surf.reason);
+      return;
+    }
+    const cv = document.createElement('canvas');
+    cv.width = surf.width;
+    cv.height = surf.height;
+    const cx = cv.getContext('2d');
+    const img = cx.createImageData(surf.width, surf.height);
+    const d = surf.data;
+    const o = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      o[i] = 255;
+      o[i + 1] = 0;
+      o[i + 2] = 255;
+      o[i + 3] = d[i + 3] > 0 ? Math.min(200, d[i]) : 0;
+    }
+    cx.putImageData(img, 0, 0);
+
+    const p1 = context.projection(surf.pixelToLonLat(0, 0));
+    const p2 = context.projection(surf.pixelToLonLat(surf.width, surf.height));
+    cv.style.position = 'absolute';
+    cv.style.left = Math.min(p1[0], p2[0]) + 'px';
+    cv.style.top = Math.min(p1[1], p2[1]) + 'px';
+    cv.style.width = Math.abs(p2[0] - p1[0]) + 'px';
+    cv.style.height = Math.abs(p2[1] - p1[1]) + 'px';
+    cv.style.pointerEvents = 'none';
+    cv.style.opacity = '0.85';
+    cv.style.zIndex = '5000';
+    cv.id = 'slidev2-debug-overlay';
+
+    const existing = document.getElementById('slidev2-debug-overlay');
+    if (existing) existing.remove();
+    const host =
+      context.container().select('.main-map').node() ||
+      context.container().node() ||
+      document.body;
+    host.appendChild(cv);
+    console.log('[slide-v2] surface overlay drawn (magenta). Compare with the blue heatmap. To remove: document.getElementById("slidev2-debug-overlay").remove()');
+  };
+
+  // Debug: draw a lon/lat polyline (cyan) over the map — used to see the algorithm's raw output
+  // before it is applied to iD, positioned with iD's own projection.
+  NS.debugDrawPath = function (lonlatPath, color) {
+    const context = NS.getContext && NS.getContext();
+    if (!context || !lonlatPath || !lonlatPath.length) return;
+    const host =
+      context.container().select('.main-map').node() || context.container().node();
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    const old = document.getElementById('slidev2-debug-path');
+    if (old) old.remove();
+    const cv = document.createElement('canvas');
+    cv.id = 'slidev2-debug-path';
+    cv.width = rect.width;
+    cv.height = rect.height;
+    cv.style.position = 'absolute';
+    cv.style.left = '0';
+    cv.style.top = '0';
+    cv.style.pointerEvents = 'none';
+    cv.style.zIndex = '5001';
+    const cx = cv.getContext('2d');
+    cx.strokeStyle = color || 'cyan';
+    cx.fillStyle = color || 'cyan';
+    cx.lineWidth = 2;
+    cx.beginPath();
+    lonlatPath.forEach((ll, i) => {
+      const p = context.projection(ll);
+      if (i === 0) cx.moveTo(p[0], p[1]);
+      else cx.lineTo(p[0], p[1]);
+    });
+    cx.stroke();
+    lonlatPath.forEach((ll) => {
+      const p = context.projection(ll);
+      cx.beginPath();
+      cx.arc(p[0], p[1], 3, 0, 2 * Math.PI);
+      cx.fill();
+    });
+    host.appendChild(cv);
+  };
+
   // --- Surfacer: turns the pixel grid into a cost surface with valueAt / gradientAt ---
 
   // Suggested slide weights (from the Go stravaheat surfacer).
   NS.SLIDE_OPTIONS = {
     gradientScale: 10, // [0,1] pixel-space surface needs a bigger scale than the Go mercator default (0.5) — tune
-    distanceScale: 0.2,
-    angleScale: 0.1,
+    distanceScale: 0.4,
+    angleScale: 0.3,
     momentumScale: 0.7,
     smoothingMeters: 25,
     resampleMeters: 5,
     trimRadiusMeters: 15,
-    simplifyTolMeters: 1,
+    simplifyTolMeters: 4,
     minLoops: 100,
     maxLoops: 4000,
     thresholdEpsilon: 0.0005,
     scoreSmoothing: 0.2,
+    maxShiftMeters: 40,
   };
 
   function metersPerPixel(z, tileSize, lat) {
     return (Math.cos((lat * Math.PI) / 180) * 40075016.686) / (tileSize * Math.pow(2, z));
   }
+  NS.metersPerPixel = metersPerPixel;
 
-  // Fast Gaussian blur via 3 box-blur passes (Kutskir) — O(W*H) regardless of sigma.
-  function boxesForGauss(sigma, n) {
-    const wIdeal = Math.sqrt((12 * sigma * sigma) / n + 1);
-    let wl = Math.floor(wIdeal);
-    if (wl % 2 === 0) wl--;
-    const wu = wl + 2;
-    const mIdeal = (12 * sigma * sigma - n * wl * wl - 4 * n * wl - 3 * n) / (-4 * wl - 4);
-    const m = Math.round(mIdeal);
-    const sizes = [];
-    for (let i = 0; i < n; i++) sizes.push(i < m ? wl : wu);
-    return sizes;
+  // Normalized Gaussian smoothing kernel. A plain Gaussian keeps enough reach for the gradient
+  // to pull the line in from a distance (the sharp-spike variant killed that reach). Applied on
+  // the small cropped grid, so direct convolution is cheap.
+  function slideKernel(sigmaPx) {
+    if (!(sigmaPx > 0)) return [1];
+    const size = Math.max(1, Math.ceil(sigmaPx * 3));
+    const k = new Array(2 * size + 1);
+    let sum = 0;
+    for (let i = -size; i <= size; i++) {
+      const v = Math.exp(-(i * i) / (2 * sigmaPx * sigmaPx));
+      k[i + size] = v;
+      sum += v;
+    }
+    for (let i = 0; i < k.length; i++) k[i] /= sum;
+    return k;
   }
 
-  function boxBlurH(src, dst, W, H, r) {
-    if (r < 1) {
-      dst.set(src);
-      return;
-    }
-    const norm = 1 / (2 * r + 1);
+  function convolveSeparable(src, W, H, kernel) {
+    const half = (kernel.length - 1) / 2;
+    const tmp = new Float32Array(W * H);
     for (let y = 0; y < H; y++) {
       const row = y * W;
-      let sum = (r + 1) * src[row];
-      for (let x = 1; x <= r; x++) sum += src[row + (x < W ? x : W - 1)];
       for (let x = 0; x < W; x++) {
-        dst[row + x] = sum * norm;
-        const add = x + r + 1;
-        const rem = x - r;
-        sum += src[row + (add < W ? add : W - 1)] - src[row + (rem > 0 ? rem : 0)];
+        let acc = 0;
+        for (let k = -half; k <= half; k++) {
+          let xx = x + k;
+          if (xx < 0) xx = 0;
+          else if (xx >= W) xx = W - 1;
+          acc += src[row + xx] * kernel[k + half];
+        }
+        tmp[row + x] = acc;
       }
     }
-  }
-
-  function boxBlurV(src, dst, W, H, r) {
-    if (r < 1) {
-      dst.set(src);
-      return;
-    }
-    const norm = 1 / (2 * r + 1);
-    for (let x = 0; x < W; x++) {
-      let sum = (r + 1) * src[x];
-      for (let y = 1; y <= r; y++) sum += src[(y < H ? y : H - 1) * W + x];
-      for (let y = 0; y < H; y++) {
-        dst[y * W + x] = sum * norm;
-        const add = y + r + 1;
-        const rem = y - r;
-        sum += src[(add < H ? add : H - 1) * W + x] - src[(rem > 0 ? rem : 0) * W + x];
+    const out = new Float32Array(W * H);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        let acc = 0;
+        for (let k = -half; k <= half; k++) {
+          let yy = y + k;
+          if (yy < 0) yy = 0;
+          else if (yy >= H) yy = H - 1;
+          acc += tmp[yy * W + x] * kernel[k + half];
+        }
+        out[y * W + x] = acc;
       }
-    }
-  }
-
-  function gaussianBlur(src, W, H, sigma) {
-    const out = new Float32Array(src);
-    if (!(sigma > 0)) return out;
-    const tmp = new Float32Array(W * H);
-    for (const w of boxesForGauss(sigma, 3)) {
-      const r = (w - 1) / 2;
-      boxBlurH(out, tmp, W, H, r);
-      boxBlurV(tmp, out, W, H, r);
     }
     return out;
   }
 
-  // surf: result of buildSurface. Returns a surfacer in heatmap pixel coords.
+  // surf: result of buildSurface; pxPath: the path in full heatmap pixel coords.
+  // Crops to the path bbox (+ margin) so the sharp kernel can be applied cheaply.
   // valueAt = raw intensity (luma masked by alpha); gradientAt = gradient of the smoothed surface.
-  NS.makeSurfacer = function (surf, opts) {
+  NS.makeSurfacer = function (surf, pxPath, opts) {
     opts = opts || {};
-    const W = surf.width;
-    const H = surf.height;
+    const fullW = surf.width;
+    const fullH = surf.height;
     const data = surf.data;
     const smoothingMeters =
       opts.smoothingMeters != null ? opts.smoothingMeters : NS.SLIDE_OPTIONS.smoothingMeters;
     const mpp = metersPerPixel(surf.z, surf.tileSize, opts.centerLat || 0);
     const sigmaPx = smoothingMeters / mpp;
 
-    const raw = new Float32Array(W * H);
-    for (let i = 0, p = 0; i < raw.length; i++, p += 4) {
-      raw[i] = data[p + 3] > 0 ? data[p] / 255 : 0; // R (luma) masked by alpha
-    }
-    const smooth = gaussianBlur(raw, W, H, sigmaPx);
+    const kernel = slideKernel(sigmaPx);
+    const margin = (kernel.length - 1) / 2 + Math.ceil(20 / mpp); // kernel reach + ~20m of room
 
-    function sample(grid, x, y) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [px, py] of pxPath) {
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+    }
+    const ox = Math.max(0, Math.floor(minX) - margin);
+    const oy = Math.max(0, Math.floor(minY) - margin);
+    const W = Math.min(fullW, Math.ceil(maxX) + margin) - ox;
+    const H = Math.min(fullH, Math.ceil(maxY) + margin) - oy;
+
+    const raw = new Float32Array(W * H);
+    for (let y = 0; y < H; y++) {
+      const srcRow = (y + oy) * fullW;
+      for (let x = 0; x < W; x++) {
+        const p = (srcRow + x + ox) * 4;
+        raw[y * W + x] = data[p + 3] > 0 ? data[p] / 255 : 0; // R (luma) masked by alpha
+      }
+    }
+    const smooth = convolveSeparable(raw, W, H, kernel);
+
+    // fx, fy are full-pixel coords; map them into the crop.
+    function sample(grid, fx, fy) {
+      let x = fx - ox;
+      let y = fy - oy;
       if (x < 0) x = 0;
       else if (x > W - 1) x = W - 1;
       if (y < 0) y = 0;
@@ -275,18 +390,20 @@
       const y0 = Math.floor(y);
       const x1 = Math.min(x0 + 1, W - 1);
       const y1 = Math.min(y0 + 1, H - 1);
-      const fx = x - x0;
-      const fy = y - y0;
+      const dx = x - x0;
+      const dy = y - y0;
       const a = grid[y0 * W + x0];
       const b = grid[y0 * W + x1];
       const c = grid[y1 * W + x0];
       const d = grid[y1 * W + x1];
-      return a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy;
+      return a * (1 - dx) * (1 - dy) + b * dx * (1 - dy) + c * (1 - dx) * dy + d * dx * dy;
     }
 
     return {
       W,
       H,
+      ox,
+      oy,
       mpp,
       sigmaPx,
       raw,
@@ -308,8 +425,9 @@
       return surf;
     }
     const centerLat = path.reduce((a, p) => a + p[1], 0) / path.length;
+    const pxPath = path.map(([lon, lat]) => surf.pixelOf(lon, lat));
     console.time('[slide-v2] smoothing');
-    const surfacer = NS.makeSurfacer(surf, { centerLat });
+    const surfacer = NS.makeSurfacer(surf, pxPath, { centerLat });
     console.timeEnd('[slide-v2] smoothing');
 
     let ascends = 0;
