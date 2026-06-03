@@ -1,6 +1,7 @@
 The MIT License (MIT)
 
-Copyright (c) 2013 Paul Mach
+Copyright (c) 2013 Paul Mach        (original Slide — see Credits in README.md)
+Copyright (c) 2026 Marcelo Chaves   (slide-v2)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
