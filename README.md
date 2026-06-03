@@ -1,82 +1,83 @@
-Slide: Vector to Raster Map Conflation
-======================================
+slide-v2
+========
 
-Slide is an algorithm/approach for conflating vector data with raster data. 
-The idea is to take a coarse approximation to the raster data and have the algorithm slide the polyline to the "image."
-The result is a properly sampled vector polyline matching the contours of the raster data.
+A small **Manifest V3 browser extension** that snaps OpenStreetMap geometry onto the **Strava
+heatmap**, right inside the **iD editor** (`www.openstreetmap.org/id`).
 
-The algorithm is presented as a Go (golang) library. The [examples](examples) directory has some example integrations.
-Most of the heavy geometry stuff is done with [go.geo](https://github.com/paulmach/go.geo), a go geography/geometry library.
+You trace a trail by hand; slide-v2 nudges each of your nodes onto the heatmap band so the line sits
+on where people actually go — without throwing away the nodes you drew.
 
-### Demos
+> Status: personal/dev tool, loaded unpacked. Not on the Chrome Web Store.
 
-Slide supports the concept of [surfacers](surfacers) that can be based on any datasource.
-
-* [Strava Global Heat](http://labs.strava.com/slide/demo.html) <br />
-	Uses the [Strava Global Heatmap](http://labs.strava.com/heatmap/)
-	to speed map tracing.
-
-Background
-----------
-
-Slide was first developed as a tool to slide [Open Street Map](http://www.openstreetmap.org/) map geometry to the 
-[Strava Global Heatmap](http://labs.strava.com/heatmap) dataset.
-The 200,000,000,000 [Strava](http://strava.com) GPS points were bucketed by pixel to create the heatmap and essentially
-creating a raster like density distribution of GPS data. For more information take a look at the links below:
-
-* [Strava Slide Overview](http://labs.strava.com/slide)
-* [Interactive Demo](http://labs.strava.com/slide/demo.html)
-* [OSM iD Editor Integration](http://strava.github.io/iD/#background=Bing&map=16.97/-122.54464/38.05472)
-* Slide presented at State of the Map US 2014 [slides](http://labs.strava.com/slide/slide-SOTM-2014.pdf) | [video](https://vimeo.com/91878015).
-
-<img src="http://i.imgur.com/rbi2kDz.gif" width="728" height="330" alt="Slide Animation" style="float: right" />
-<br />
-**Above:**
-The black polyline is being "slided" to the green path, matching the Strava global heatmap data.
-Red lines are the intermediate steps of the refinement.
-
-Algorithm Overview
-------------------
-
-At a high level, Slide works by modeling an input line, or string, sliding into the valleys of a surface. 
-The surface can be built from any datasource.
-
-One can imagine a coarse input "string of beads" being placed on the surface and letting gravity pull it downward.
-When movement stops, the string should follow the valleys.
-
-#### Details
-
-To mimic the flexibility of a "string of beads," or something similar, the input line is resampled.
-This allows the discretely sampled line to still behave like a naturally flexible object.
-
-This resampled line is then ran through a loop where each vertex or point is corrected based on a cost function.
-This cost function has 3 main parts:
-
-* Depth with respect to the surface
-* Equal distance between resampled points (smooth parametric derivative)
-* Maximize vertex angles (smooth parametric second derivative)
-
-The components are weighted with the surface getting the most. The other parts are to ensure the line doesn't
-collapse in on itself and maintains some sense of rigidity.
-To speed conversion of the process, a momentum component is added where
-a fraction of the correction from the previous loop is added in.
-
-Once the process converges, the line is simplified again and sent back as the result.
-
-<img src="http://i.imgur.com/WCjdlsc.png" width="728" height="407" alt="Slide Algorithm Overview" />
-
-#### Potential improvement
-
-Many! There are the basic things like improving the cost function weightings 
-as well as more challenging things such as incorporating more information from the input data, such as direction.
-I'd also like to support the sliding of more complex goemetries, such as a road grid.
-
-Related Work
+Requirements
 ------------
 
-As they say, "There is nothing new under the sun."
+- **Chrome 111+** (or a Chromium browser that supports MV3 `world: "MAIN"` content scripts).
+- The **Strava Heatmap browser extension by julcnx**, installed and enabled, with you **logged in to
+  Strava**. slide-v2 reads the *authenticated* heatmap tiles client-side, and relies on that
+  extension to (a) attach your Strava cookie to the tile requests and (b) set
+  `Access-Control-Allow-Origin: *` so the tiles can be read off a canvas without tainting it.
+- The Strava heatmap overlay turned **on** in iD (provided by that extension).
 
-* [Google correcting Street View sensor data](http://google-opensource.blogspot.com/2012/05/introducing-ceres-solver-nonlinear.html)
-	using a nonlinear least squares solver.
-* [Active Contours, Deformable Models, and Gradient Vector Flow](http://www.iacl.ece.jhu.edu/static/gvf/)
-* [Snakes: Active Contour Models](http://www.cs.ucla.edu/~dt/papers/ijcv88/ijcv88.pdf), published 1988
+slide-v2 itself needs no special permissions — it only runs on `www.openstreetmap.org/id*`.
+
+Install (load unpacked)
+-----------------------
+
+1. `chrome://extensions` → enable **Developer mode**.
+2. **Load unpacked** → select this repository folder (the one containing `manifest.json`).
+3. Open the iD editor at `https://www.openstreetmap.org/id` and turn on the Strava heatmap overlay.
+
+Usage
+-----
+
+1. Select a **way** (a line/trail) — or 2+ of its vertices.
+2. Press **Alt+S**, or click **Slide** at the top of iD's edit menu.
+3. The way's interior nodes snap onto the heatmap band. Endpoints and "interesting" nodes
+   (shared junctions, tagged nodes, nodes in relations) are left in place, so connected features
+   aren't dragged. The change is a single, undoable edit (Ctrl+Z).
+
+### Debug shortcuts
+
+- **Alt+Shift+H** — overlay the heatmap *as the extension reads it* (gray intensity → heat colormap,
+  white = hottest) on the map, to check the line lands on the band. Toggle again to remove.
+- **Alt+Shift+S** — download `slide-dump.json`: the heatmap crop + path of the last slide, for
+  offline inspection.
+
+How it works
+------------
+
+- `capture-context.js` grabs iD's internal `context` (by wrapping `iD.coreContext()`), giving access
+  to the graph, projection, and selection.
+- `heatmap.js` reads the active Strava heatmap tiles for the path's bounding box, forcing the **gray**
+  color scheme (pixel luminance ≈ activity intensity), stitches them to a canvas, and exposes a
+  surface with `pixelOf` / `pixelToLonLat` and a per-pixel intensity sampler.
+- `slide-core.js` does the **snap**: for each interior node it searches *perpendicular* to the local
+  trail direction for the brightest heatmap point within a small window, weighted toward where you
+  drew the line (so it refines onto the local band instead of jumping to a brighter neighbour such as
+  a parallel road), then smooths the sideways offsets along the trail. It **keeps your nodes** (IDs,
+  count, order, junctions, tags) — it only moves each one a little.
+- `slide-operation.js` wires up the **Alt+S** shortcut and the **Slide** button in iD's edit menu.
+
+All four scripts run in the page's `MAIN` world (and in all frames, since iD runs in an iframe).
+
+Credits
+-------
+
+slide-v2 was originally **forked from and inspired by [paulmach/slide](https://github.com/paulmach/slide)**
+(MIT) — the project that introduced "sliding" OpenStreetMap geometry onto the Strava heatmap and first
+integrated it into the iD editor.
+
+It is, however, an **independent re-implementation**: a Manifest V3 extension with its own client-side
+snapping algorithm. paulmach's original resamples a rough line and reshapes it with an iterative
+gradient/distance/angle cost function — great for crude input that needs major reshaping. slide-v2
+instead assumes the hand trace is already good and only makes a small local correction, so it does
+**not** use any of paulmach/slide's code.
+
+Thanks also to **julcnx**'s Strava Heatmap extension, which makes the authenticated heatmap tiles
+readable client-side.
+
+License
+-------
+
+MIT — see [LICENSE.md](LICENSE.md).
