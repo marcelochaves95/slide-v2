@@ -9,33 +9,48 @@ on where people actually go — without throwing away the nodes you drew.
 
 > Status: personal/dev tool, loaded unpacked. Not on the Chrome Web Store.
 
-Requirements
-------------
+Pre-requisites
+--------------
 
-- **Chrome 111+** (or a Chromium browser that supports MV3 `world: "MAIN"` content scripts).
-- The **Strava Heatmap browser extension by julcnx**, installed and enabled, with you **logged in to
-  Strava**. slide-v2 reads the *authenticated* heatmap tiles client-side, and relies on that
-  extension to (a) attach your Strava cookie to the tile requests and (b) set
-  `Access-Control-Allow-Origin: *` so the tiles can be read off a canvas without tainting it.
-- The Strava heatmap overlay turned **on** in iD (provided by that extension).
+slide-v2 reads the **authenticated** Strava heatmap tiles client-side, so it depends on the heatmap
+already being visible in iD. Set that up first:
 
-slide-v2 itself needs no special permissions — it only runs on `www.openstreetmap.org/id*`.
+1. **Strava account** — free, at https://www.strava.com/register/free (needed to view the heatmap).
+2. **Strava Heatmap extension by julcnx** — install it from the Chrome Web Store / Firefox Add-ons
+   (see [julcnx/strava-heatmap-extension](https://github.com/julcnx/strava-heatmap-extension)). It
+   authenticates the tiles (attaches your Strava cookie) and adds `Access-Control-Allow-Origin: *`,
+   which is what lets slide-v2 read the tiles off a canvas.
+3. **Enable the heatmap overlay in iD:**
+   1. Open the iD editor: https://www.openstreetmap.org/edit?editor=id
+   2. Press **B** (Background settings) → scroll to **Overlays** → select a **Strava Heatmap** overlay.
+   3. If you see *"Click the Strava Heatmap extension icon to log into Strava…"*, click the **red**
+      extension icon to log in.
+   4. Use the **green** extension icon to pick the **activity type and color** of the heatmap.
+   5. **Shift+Q** toggles the heatmap on/off.
 
-Install (load unpacked)
------------------------
+A browser that supports MV3 `world: "MAIN"` content scripts is required (**Chrome 111+** or
+equivalent Chromium).
 
-1. `chrome://extensions` → enable **Developer mode**.
-2. **Load unpacked** → select this repository folder (the one containing `manifest.json`).
-3. Open the iD editor at `https://www.openstreetmap.org/id` and turn on the Strava heatmap overlay.
+Install slide-v2 (load unpacked)
+--------------------------------
+
+1. `chrome://extensions` → enable **Developer mode** (top-right).
+2. Click **Load unpacked** → select this repository folder (the one containing `manifest.json`).
+3. Reload the iD editor tab. slide-v2 only runs on `www.openstreetmap.org/id*` and needs no special
+   permissions of its own.
+
+To update after pulling changes: hit the **↻** (reload) on the extension card in `chrome://extensions`,
+then refresh the iD tab.
 
 Usage
 -----
 
-1. Select a **way** (a line/trail) — or 2+ of its vertices.
-2. Press **Alt+S**, or click **Slide** at the top of iD's edit menu.
-3. The way's interior nodes snap onto the heatmap band. Endpoints and "interesting" nodes
-   (shared junctions, tagged nodes, nodes in relations) are left in place, so connected features
-   aren't dragged. The change is a single, undoable edit (Ctrl+Z).
+1. Make sure the Strava heatmap overlay is on (see pre-requisites) and the trail's band is visible.
+2. Select a **way** (a line/trail) — or 2+ of its vertices.
+3. Press **Alt+S**, or click **Slide** at the top of iD's edit menu.
+4. The way's interior nodes snap onto the heatmap band. Endpoints and "interesting" nodes (shared
+   junctions, tagged nodes, nodes in relations) stay put, so connected features aren't dragged. It's
+   a single, undoable edit (**Ctrl+Z**).
 
 ### Debug shortcuts
 
@@ -61,6 +76,21 @@ How it works
 
 All four scripts run in the page's `MAIN` world (and in all frames, since iD runs in an iframe).
 
+Troubleshooting
+---------------
+
+- **"Slide" does nothing / "cannot read heatmap".** Make sure the julcnx extension is enabled, you're
+  logged in to Strava (red icon → log in), and a Strava Heatmap overlay is selected and visible in iD.
+- **"tainted canvas".** Same cause — the tiles weren't served with the CORS header. Confirm the
+  julcnx extension is on and the heatmap is actually loading.
+- **The line lands off the band you see.** Open the console and look for the `[slide-v2] heatmap …`
+  line: it logs the exact tile URL being read. If it warns that it fell back to `all/gray`, or the
+  activity in the URL doesn't match the sport you picked in julcnx, the extension is reading a
+  different heatmap than the one displayed — pick the matching overlay in iD. Use **Alt+Shift+H** to
+  compare the read heatmap against the blue one.
+- Open the DevTools console **in the iD iframe context** (the context selector at the top of the
+  Console, usually `id-embed`) if you want to call `window.__slideV2.*` helpers by hand.
+
 Credits
 -------
 
@@ -74,8 +104,8 @@ gradient/distance/angle cost function — great for crude input that needs major
 instead assumes the hand trace is already good and only makes a small local correction, so it does
 **not** use any of paulmach/slide's code.
 
-Thanks also to **julcnx**'s Strava Heatmap extension, which makes the authenticated heatmap tiles
-readable client-side.
+Thanks also to **[julcnx](https://github.com/julcnx/strava-heatmap-extension)**'s Strava Heatmap
+extension, which makes the authenticated heatmap tiles readable client-side.
 
 License
 -------
